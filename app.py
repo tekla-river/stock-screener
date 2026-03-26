@@ -357,15 +357,25 @@ def main():
     try:
         if force_refresh:
             st.cache_data.clear()
-            raw_data = prepare_data(force_refresh=True)
+            logs = []
+            with st.status("⏳ 正在获取数据...", expanded=True) as data_status:
+                log_area = st.empty()
+
+                def log(msg):
+                    logs.append(msg)
+                    log_area.code("\n".join(logs), language=None)
+
+                raw_data = prepare_data(force_refresh=True, log_callback=log)
+                data_status.update(label=f"✅ 数据就绪：{len(raw_data)} 只股票", state="complete")
         elif run_btn or "_raw_data" not in st.session_state:
             raw_data = cached_prepare_data()
+            st.toast(f"使用缓存数据：{len(raw_data)} 只股票")
         else:
             raw_data = st.session_state["_raw_data"]
             st.toast(f"使用缓存数据：{len(raw_data)} 只股票")
 
         st.session_state["_raw_data"] = raw_data
-        if not (run_btn is False and auto_run):
+        if not force_refresh and run_btn:
             st.success(f"✅ 数据就绪：**{len(raw_data)}** 只股票")
     except Exception as e:
         st.error(f"数据获取失败: {e}")

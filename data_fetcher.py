@@ -204,13 +204,14 @@ def _generate_a_share_codes() -> List[str]:
     return codes
 
 
-def _get_market_from_tencent(codes: List[str] = None) -> pd.DataFrame:
+def _get_market_from_tencent(codes: List[str] = None, log_callback=None) -> pd.DataFrame:
     """
     通过腾讯行情接口批量获取A股行情
     特点：稳定（腾讯系接口）、快速（每批800条，全量~7批=~2秒）
     额外提供：近3月/6月涨跌幅（动量数据）
     """
-    print("正在获取A股行情（腾讯行情接口）...")
+    _log = log_callback or (lambda msg: None)
+    _log("📊 正在获取行情数据（腾讯接口）...")
     start_time = time.time()
 
     # 获取股票代码列表
@@ -242,7 +243,7 @@ def _get_market_from_tencent(codes: List[str] = None) -> pd.DataFrame:
                 if record:
                     all_records.append(record)
         except Exception as e:
-            print(f"  [警告] 批次请求失败: {e}")
+            _log(f"  ⚠️ 批次请求失败: {e}")
 
     if not all_records:
         raise RuntimeError("腾讯行情接口返回空数据")
@@ -264,7 +265,7 @@ def _get_market_from_tencent(codes: List[str] = None) -> pd.DataFrame:
             df[col] = df[col] * scale
 
     elapsed = time.time() - start_time
-    print(f"[完成] 腾讯接口获取 {len(df)} 只股票行情（{elapsed:.1f}s）")
+    _log(f"✅ 腾讯接口获取 {len(df)} 只股票行情（{elapsed:.1f}s）")
     return df
 
 
@@ -287,9 +288,10 @@ EM_NUMERIC_FIELDS = [
 ]
 
 
-def _get_market_from_eastmoney() -> pd.DataFrame:
+def _get_market_from_eastmoney(log_callback=None) -> pd.DataFrame:
     """东方财富push2接口（回退方案，可能被IP限流）"""
-    print("正在获取A股行情（东方财富push2回退）...")
+    _log = log_callback or (lambda msg: None)
+    _log("📊 正在获取行情数据（东方财富push2回退）...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "6000", "po": "1", "np": "1",
@@ -314,18 +316,19 @@ def _get_market_from_eastmoney() -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    print(f"[完成] 东方财富获取 {len(df)} 只股票行情")
+    _log(f"✅ 东方财富获取 {len(df)} 只股票行情")
     return df
 
 
 
 
 
-def get_market_data(force_refresh: bool = False) -> pd.DataFrame:
+def get_market_data(force_refresh: bool = False, log_callback=None) -> pd.DataFrame:
     """
     获取全A股行情数据
     优先级：缓存 > 腾讯行情接口(~2秒,含动量) > 东方财富push2(~1秒)
     """
+    _log = log_callback or (lambda msg: None)
     _ensure_cache_dir()
     cache_path = os.path.join(CACHE_DIR, "market_data.csv")
 
@@ -333,20 +336,20 @@ def get_market_data(force_refresh: bool = False) -> pd.DataFrame:
         cached = _load_cache("market_data.csv", dtype_cols={"代码": str})
         if cached is not None and _is_cache_valid(cache_path, CACHE_HOURS):
             age = _cache_age_hours(cache_path)
-            print(f"[缓存] 行情数据 {len(cached)} 只（{age:.1f}h前）")
+            _log(f"📦 [缓存] 行情数据 {len(cached)} 只（{age:.1f}h前）")
             return cached
 
     # 策略1: 腾讯行情接口（稳定，含动量数据）
     try:
-        df = _get_market_from_tencent()
+        df = _get_market_from_tencent(log_callback=log_callback)
         _save_cache(df, "market_data.csv")
         return df
     except Exception as e:
-        print(f"[警告] 腾讯接口失败({e})，尝试东方财富push2...")
+        _log(f"⚠️ 腾讯接口失败({e})，尝试东方财富push2...")
 
     # 策略2: 东方财富push2
     try:
-        df = _get_market_from_eastmoney()
+        df = _get_market_from_eastmoney(log_callback=log_callback)
         _save_cache(df, "market_data.csv")
         return df
     except Exception as e:
@@ -491,12 +494,13 @@ EM_EBITDA_NUMERIC_FIELDS = ["营业利润_报表", "财务费用", "总负债", 
 
 
 def _fetch_report_latest_pages(report_name: str, max_pages: int = 20,
-                                label: str = "") -> pd.DataFrame:
+                                label: str = "", log_callback=None) -> pd.DataFrame:
     """
     获取报表最近的数据（按REPORT_DATE降序），无需日期过滤。
     RPT_DMSK_FN_INCOME/BALANCE 等报表不支持 REPORT_DATE_NAME 过滤，
     因此按日期降序取前若干页，再本地去重保留每只股票最新一条。
     """
+    _log = log_callback or (lambda msg: None)
     all_items = []
     for page in range(1, max_pages + 1):
         try:
@@ -504,11 +508,11 @@ def _fetch_report_latest_pages(report_name: str, max_pages: int = 20,
                 report_name, page, sort_col="REPORT_DATE", sort_dir="-1")
             all_items.extend(items)
             if page <= 2 or page % 5 == 0:
-                print(f"  [{label} 第{page}页] 获取 {len(items)} 条，累计 {len(all_items)} 条")
+                _log(f"  [{label} 第{page}页] 获取 {len(items)} 条，累计 {len(all_items)} 条")
             if len(items) == 0 or len(all_items) >= total:
                 break
         except Exception as e:
-            print(f"  [{label} 第{page}页获取失败: {e}]")
+            _log(f"  ⚠️ [{label} 第{page}页获取失败: {e}]")
             break
 
     if not all_items:
@@ -551,7 +555,7 @@ def _fetch_em_report_page_no_filter(report_name: str, page: int, page_size: int 
     return items, total_count
 
 
-def _get_ebitda_supplement_from_emdata() -> pd.DataFrame:
+def _get_ebitda_supplement_from_emdata(log_callback=None) -> pd.DataFrame:
     """
     从东方财富利润表和资产负债表获取 EBITDA/EV 计算所需补充字段:
       - 营业利润（利润表）
@@ -559,18 +563,19 @@ def _get_ebitda_supplement_from_emdata() -> pd.DataFrame:
       - 总负债（资产负债表）
       - 货币资金（资产负债表）
     """
-    print("正在获取EBITDA/EV补充数据（利润表+资产负债表）...")
+    _log = log_callback or (lambda msg: None)
+    _log("📊 正在获取EBITDA/EV补充数据（利润表+资产负债表）...")
     start_time = time.time()
 
     # 利润表：获取营业利润和财务费用
-    income_df = _fetch_report_latest_pages("RPT_DMSK_FN_INCOME", max_pages=20, label="利润表")
+    income_df = _fetch_report_latest_pages("RPT_DMSK_FN_INCOME", max_pages=20, label="利润表", log_callback=log_callback)
 
     # 资产负债表：获取总负债和货币资金
-    balance_df = _fetch_report_latest_pages("RPT_DMSK_FN_BALANCE", max_pages=20, label="资产负债表")
+    balance_df = _fetch_report_latest_pages("RPT_DMSK_FN_BALANCE", max_pages=20, label="资产负债表", log_callback=log_callback)
 
     # 合并两张表
     if income_df.empty and balance_df.empty:
-        print("[警告] 利润表和资产负债表均获取失败")
+        _log("[警告] 利润表和资产负债表均获取失败")
         return pd.DataFrame()
 
     if not income_df.empty and not balance_df.empty:
@@ -596,7 +601,7 @@ def _get_ebitda_supplement_from_emdata() -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     elapsed = time.time() - start_time
-    print(f"[完成] EBITDA/EV补充数据获取 {len(df)} 只股票（{elapsed:.1f}s）")
+    _log(f"✅ EBITDA/EV补充数据 {len(df)} 只（{elapsed:.1f}s）")
     return df
 
 
@@ -622,12 +627,13 @@ def _fetch_em_financial_page(page: int, page_size: int) -> List[Dict]:
     return items, total_count
 
 
-def _get_financial_from_emdata() -> pd.DataFrame:
+def _get_financial_from_emdata(log_callback=None) -> pd.DataFrame:
     """
     从东方财富数据中心批量获取全A股年报财务指标
     一次请求约5000条，分页获取全量，~3秒完成
     """
-    print("正在获取A股财务数据（东方财富数据中心）...")
+    _log = log_callback or (lambda msg: None)
+    _log("📈 正在获取财务数据（东方财富数据中心）...")
     start_time = time.time()
 
     page_size = 5000
@@ -636,7 +642,7 @@ def _get_financial_from_emdata() -> pd.DataFrame:
     # 第一页
     items, total = _fetch_em_financial_page(1, page_size)
     all_items.extend(items)
-    print(f"  [第1页] 获取 {len(items)} 条，共 {total} 条")
+    _log(f"  第1页 获取 {len(items)} 条，共 {total} 条")
 
     # 后续分页
     page = 2
@@ -644,10 +650,10 @@ def _get_financial_from_emdata() -> pd.DataFrame:
         try:
             items, _ = _fetch_em_financial_page(page, page_size)
             all_items.extend(items)
-            print(f"  [第{page}页] 获取 {len(items)} 条，累计 {len(all_items)} 条")
+            _log(f"  第{page}页 获取 {len(items)} 条，累计 {len(all_items)} 条")
             page += 1
         except Exception as e:
-            print(f"  [警告] 第{page}页获取失败: {e}")
+            _log(f"  ⚠️ 第{page}页获取失败: {e}")
             break
 
     if not all_items:
@@ -679,16 +685,17 @@ def _get_financial_from_emdata() -> pd.DataFrame:
         df = df.drop_duplicates(subset="code", keep="first")
 
     elapsed = time.time() - start_time
-    print(f"[完成] 东方财富数据中心获取 {len(df)} 只股票财务数据（{elapsed:.1f}s）")
+    _log(f"✅ 财务数据获取 {len(df)} 只股票（{elapsed:.1f}s）")
     return df
 
 
 def get_financial_data(codes: List[str], force_refresh: bool = False,
-                       progress_callback=None) -> Optional[pd.DataFrame]:
+                       log_callback=None) -> Optional[pd.DataFrame]:
     """
     获取财务数据
     优先级：缓存 > 东方财富数据中心（批量，~3秒）
     """
+    _log = log_callback or (lambda msg: None)
     _ensure_cache_dir()
     cache_path = os.path.join(CACHE_DIR, "financial_data.csv")
 
@@ -696,24 +703,24 @@ def get_financial_data(codes: List[str], force_refresh: bool = False,
         cached = _load_cache("financial_data.csv", dtype_cols={"code": str})
         if cached is not None and _is_cache_valid(cache_path, FINANCIAL_CACHE_HOURS):
             age = _cache_age_hours(cache_path)
-            print(f"[缓存] 财务数据 {len(cached)} 只（{age:.1f}h前）")
+            _log(f"📦 [缓存] 财务数据 {len(cached)} 只（{age:.1f}h前）")
             return cached
 
     # 东方财富数据中心（批量，免费无限制，~3秒）
     try:
-        df = _get_financial_from_emdata()
+        df = _get_financial_from_emdata(log_callback=log_callback)
         _save_cache(df, "financial_data.csv")
         return df
     except Exception as e:
-        print(f"[警告] 东方财富数据中心失败({e})")
+        _log(f"⚠️ 东方财富数据中心失败({e})")
 
     # 使用旧缓存作为回退
     cached = _load_cache("financial_data.csv", dtype_cols={"code": str})
     if cached is not None:
-        print(f"[回退] 使用旧缓存 {len(cached)} 条")
+        _log(f"📦 [回退] 使用旧缓存 {len(cached)} 条")
         return cached
 
-    print("[错误] 财务数据获取失败")
+    _log("❌ 财务数据获取失败")
     return None
 
 
@@ -742,8 +749,9 @@ def get_stock_list(force_refresh: bool = False) -> pd.DataFrame:
 # 股票过滤
 # ============================================================
 
-def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
+def filter_stocks(df: pd.DataFrame, log_callback=None) -> pd.DataFrame:
     """过滤ST、*ST、退市、停牌等"""
+    _log = log_callback or (lambda msg: None)
     original = len(df)
     if "名称" not in df.columns:
         return df
@@ -757,7 +765,7 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
     filtered = df[mask].copy().reset_index(drop=True)
     removed = original - len(filtered)
     if removed > 0:
-        print(f"[过滤] 去除 {removed} 只（ST/停牌等），剩余 {len(filtered)} 只")
+        _log(f"🔍 过滤 ST/停牌等，去除 {removed} 只，剩余 {len(filtered)} 只")
     return filtered
 
 
@@ -765,7 +773,7 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
 # 数据准备（主入口）
 # ============================================================
 
-def prepare_data(force_refresh: bool = False, progress_callback=None) -> pd.DataFrame:
+def prepare_data(force_refresh: bool = False, log_callback=None) -> pd.DataFrame:
     """
     准备完整的选股数据集
 
@@ -776,32 +784,33 @@ def prepare_data(force_refresh: bool = False, progress_callback=None) -> pd.Data
       4. 补充EBITDA/EV数据（利润表+资产负债表，~5秒）
       5. 合并
     """
+    _log = log_callback or (lambda msg: None)
     # 1. 行情数据（腾讯接口自带近3月/6月涨跌幅）
-    market = get_market_data(force_refresh)
-    market = filter_stocks(market)
+    market = get_market_data(force_refresh, log_callback=log_callback)
+    market = filter_stocks(market, log_callback=log_callback)
 
     code_col = "代码" if "代码" in market.columns else "code"
     codes = market[code_col].dropna().astype(str).str.zfill(6).tolist()
-    print(f"待补充数据: {len(codes)} 只股票")
+    _log(f"📊 待补充数据: {len(codes)} 只股票")
 
     # 检查行情数据是否已含动量字段
     has_momentum = "近3月涨跌幅" in market.columns or "近6月涨跌幅" in market.columns
     if has_momentum:
         momentum_valid = market.get("近3月涨跌幅", pd.Series(dtype=float)).notna().sum()
-        print(f"[信息] 行情数据已含动量字段，{momentum_valid} 只有效")
+        _log(f"ℹ️ 行情数据已含动量字段，{momentum_valid} 只有效")
 
     # 2. 财务数据（东方财富数据中心批量获取）
-    financial = get_financial_data(codes, force_refresh, progress_callback)
+    financial = get_financial_data(codes, force_refresh, log_callback=log_callback)
 
     if financial is not None and not financial.empty:
         df = market.merge(financial, left_on=code_col, right_on="code",
                           how="left", suffixes=("", "_fin"))
         dup_cols = [c for c in df.columns if c.endswith("_fin") and c[:-4] in df.columns]
         df = df.drop(columns=dup_cols)
-        print(f"[合并] {len(df)} 只股票，{len(df.columns)} 个字段")
+        _log(f"🔗 合并行情+财务: {len(df)} 只股票，{len(df.columns)} 个字段")
     else:
         df = market.copy()
-        print(f"[警告] 无财务数据，仅使用行情字段（{len(df.columns)} 个）")
+        _log(f"⚠️ 无财务数据，仅使用行情字段（{len(df.columns)} 个）")
 
     # 3. EBITDA/EV 补充数据（利润表+资产负债表）
     _ensure_cache_dir()
@@ -812,14 +821,14 @@ def prepare_data(force_refresh: bool = False, progress_callback=None) -> pd.Data
         if cached is not None and _is_cache_valid(ebitda_cache, FINANCIAL_CACHE_HOURS):
             ebitda_df = cached
             age = _cache_age_hours(ebitda_cache)
-            print(f"[缓存] EBITDA补充数据 {len(cached)} 只（{age:.1f}h前）")
+            _log(f"📦 [缓存] EBITDA补充数据 {len(cached)} 只（{age:.1f}h前）")
     if ebitda_df is None:
         try:
-            ebitda_df = _get_ebitda_supplement_from_emdata()
+            ebitda_df = _get_ebitda_supplement_from_emdata(log_callback=log_callback)
             if not ebitda_df.empty:
                 _save_cache(ebitda_df, "ebitda_supplement.csv")
         except Exception as e:
-            print(f"[警告] EBITDA补充数据获取失败: {e}")
+            _log(f"⚠️ EBITDA补充数据获取失败: {e}")
 
     if ebitda_df is not None and not ebitda_df.empty:
         merge_code = "代码" if "代码" in df.columns else "code"
@@ -827,10 +836,10 @@ def prepare_data(force_refresh: bool = False, progress_callback=None) -> pd.Data
                        how="left", suffixes=("", "_ebitda"))
         dup_cols = [c for c in df.columns if c.endswith("_ebitda") and c[:-7] in df.columns]
         df = df.drop(columns=dup_cols)
-        print(f"[合并] EBITDA补充数据已合并，{len(df.columns)} 个字段")
+        _log(f"🔗 合并EBITDA补充数据，{len(df.columns)} 个字段")
 
     # 4. 动量数据检查（腾讯接口已提供，此处仅做提示）
     if not has_momentum or df.get("近3月涨跌幅", pd.Series(dtype=float)).notna().sum() < 10:
-        print("[信息] 动量数据不可用，依赖动量的策略（趋势+价值、价值+增长等）将无法运行")
+        _log("⚠️ 动量数据不可用，依赖动量的策略将无法运行")
 
     return df
