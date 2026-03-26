@@ -22,6 +22,13 @@ from factors import compute_all_factors
 from config import STRATEGIES, CACHE_DIR
 from strategy_details import STRATEGY_DETAILS
 
+
+@st.cache_data(ttl=4 * 3600, show_spinner="⏳ 正在获取市场数据...")
+def cached_prepare_data():
+    """Streamlit 缓存版数据获取，4小时过期"""
+    return prepare_data(force_refresh=False)
+
+
 # ============================================================
 # 页面配置
 # ============================================================
