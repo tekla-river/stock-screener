@@ -347,20 +347,22 @@ def main():
         return
 
     # 数据获取
-    need_fetch = run_btn or "_raw_data" not in st.session_state
-    if need_fetch:
-        with st.status("获取数据...", expanded=True) as status:
-            try:
-                raw_data = prepare_data(force_refresh=force_refresh)
-                st.write(f"✅ 数据就绪：**{len(raw_data)}** 只股票")
-                st.session_state["_raw_data"] = raw_data
-            except Exception as e:
-                st.error(f"数据获取失败: {e}")
-                status.update(label="数据获取失败", state="error")
-                return
-    else:
-        raw_data = st.session_state["_raw_data"]
-        st.toast(f"使用缓存数据：{len(raw_data)} 只股票")
+    try:
+        if force_refresh:
+            st.cache_data.clear()
+            raw_data = prepare_data(force_refresh=True)
+        elif run_btn or "_raw_data" not in st.session_state:
+            raw_data = cached_prepare_data()
+        else:
+            raw_data = st.session_state["_raw_data"]
+            st.toast(f"使用缓存数据：{len(raw_data)} 只股票")
+
+        st.session_state["_raw_data"] = raw_data
+        if not (run_btn is False and auto_run):
+            st.success(f"✅ 数据就绪：**{len(raw_data)}** 只股票")
+    except Exception as e:
+        st.error(f"数据获取失败: {e}")
+        return
 
     st.session_state["_strategy_changed"] = False
 
