@@ -8,17 +8,30 @@ import numpy as np
 from typing import Tuple
 
 from factors import compute_all_factors
-from config import MARKET_CAP_MIN, STRATEGIES
+from config import MARKET_CAP_LEVELS, STRATEGIES
 
 
 # ============================================================
 # 公共筛选工具
 # ============================================================
 
-def _apply_market_cap_filter(df: pd.DataFrame) -> pd.DataFrame:
-    """最低市值过滤（默认20亿人民币）"""
-    if MARKET_CAP_MIN and "总市值" in df.columns:
-        return df[df["总市值"] >= MARKET_CAP_MIN].copy()
+def _get_market_cap_threshold(strategy_id: str) -> float:
+    """根据策略ID获取对应的市值阈值"""
+    level = STRATEGIES.get(strategy_id, {}).get("market_cap_level", "all_stocks")
+    threshold = MARKET_CAP_LEVELS.get(level, MARKET_CAP_LEVELS["all_stocks"])
+    return threshold
+
+
+def _apply_market_cap_filter(df: pd.DataFrame, strategy_id: str = None, threshold: float = None) -> pd.DataFrame:
+    """
+    市值过滤。
+    优先使用显式传入的 threshold，否则根据 strategy_id 从配置中获取对应级别的阈值。
+    threshold=None 表示不进行过滤（龙头股策略由 _is_turtle 动态筛选）。
+    """
+    if threshold is None and strategy_id is not None:
+        threshold = _get_market_cap_threshold(strategy_id)
+    if threshold is not None and "总市值" in df.columns:
+        return df[df["总市值"] >= threshold].copy()
     return df
 
 
@@ -34,19 +47,38 @@ def _apply_momentum_filter(df: pd.DataFrame) -> pd.DataFrame:
 def _is_turtle(df: pd.DataFrame) -> pd.DataFrame:
     """
     龙头股筛选（书中定义的"龙头"）
-    原始定义：市值>平均 + 现金流>平均 + 流通股>平均 + 销售额>平均的50%
-    A股适配：总市值>中位值 + 流通市值>中位值 + 成交额>中位值（替代现金流/销售额）
+    原始定义：市值>平均值 + 流通股>平均值 + 现金流>平均值 + 销售额>平均值的150%
+    A股适配：总市值>平均值 + 流通市值>平均值 + 营业收入>平均值×150%（替代销售额）
+             + 现金流>平均值（若有） + 排除公用事业
     """
     required = ["总市值", "流通市值"]
     for c in required:
         if c not in df.columns:
             return df.head(0)
     mask = (
-        (df["总市值"] > df["总市值"].median())
-        & (df["流通市值"] > df["流通市值"].median())
+        (df["总市值"] > df["总市值"].mean())
+        & (df["流通市值"] > df["流通市值"].mean())
     )
+    # 营业收入 > 平均值 × 150%（书中：销售额 > 平均值的150%）
+    revenue_col = None
+    for col_name in ["营业收入", "营业总收入", "OPERATE_INCOME"]:
+        if col_name in df.columns:
+            revenue_col = col_name
+            break
+    if revenue_col:
+        revenue = pd.to_numeric(df[revenue_col], errors="coerce")
+        mask &= revenue > revenue.mean() * 1.5
+
+    # 成交额 > 平均值（替代现金流的A股适配）
     if "成交额" in df.columns:
-        mask &= df["成交额"] > df["成交额"].median()
+        mask &= df["成交额"] > df["成交额"].mean()
+
+    # 排除公用事业（书中明确要求）
+    if "行业" in df.columns:
+        mask &= ~df["行业"].astype(str).str.contains("电力|燃气|水务|环保|公用", na=False)
+    elif "所属行业" in df.columns:
+        mask &= ~df["所属行业"].astype(str).str.contains("电力|燃气|水务|环保|公用", na=False)
+
     return df[mask].copy()
 
 
@@ -68,7 +100,7 @@ def strategy_low_pe_top10(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     低市盈率前10%
     书中结论：低PE组长期显著跑赢高PE组
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "low_pe_top10")
     df = compute_all_factors(df)
     valid = df[df["pe"].notna() & (df["pe"] > 0)].copy()
 
@@ -84,7 +116,7 @@ def strategy_low_pb_top20(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     低市净率前20%（书中"第2组"）
     书中结论：PB最低的10%包含价值陷阱，第2组（10%~30%）更优
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "low_pb_top20")
     df = compute_all_factors(df)
     valid = df[df["pb"].notna() & (df["pb"] > 0)].copy()
 
@@ -112,7 +144,7 @@ def strategy_vc1_top10(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     复合价值因子一（VC1）前10%
     整合 PE + PB + PS + 市现率，综合得分最高的10% = 最便宜的10%
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "vc1_top10")
     df = compute_all_factors(df)
     valid = _valid_valuation(df)
 
@@ -128,7 +160,7 @@ def strategy_vc2_top10(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     复合价值因子二（VC2）前10%
     VC1 + 股东收益率（A股简化为股息率）
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "vc2_top10")
     df = compute_all_factors(df)
     valid = _valid_valuation(df)
 
@@ -143,20 +175,20 @@ def strategy_vc2_top10(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
 # 动量+价值组合策略（书中第25章"潜力股"）
 # ============================================================
 
-def _strategy_momentum_value(df: pd.DataFrame, n: int) -> Tuple[pd.DataFrame, str]:
+def _strategy_momentum_value(df: pd.DataFrame, n: int, strategy_id: str) -> Tuple[pd.DataFrame, str]:
     """
     趋势+价值组合（通用）
-    书中规则：VC2前30% → 3/6月涨幅>中位值 → 6月涨幅最佳N只
+    书中规则（第27章）：VC2前10% → 6月价格增值最佳N只
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, strategy_id)
     df = compute_all_factors(df)
     valid = _valid_valuation(df)
 
-    # 步骤1：VC2前30%
-    vc2_cutoff = valid["vc2_score"].quantile(0.70)
+    # 步骤1：VC2前10%（第1组十分位）
+    vc2_cutoff = valid["vc2_score"].quantile(0.90)
     vc2_pool = valid[valid["vc2_score"] >= vc2_cutoff].copy()
 
-    # 步骤2：动量过滤
+    # 步骤2：动量过滤（书中仅按6月涨幅排序，但添加动量预过滤可提升实际效果）
     momentum_pool = _apply_momentum_filter(vc2_pool)
     if len(momentum_pool) == 0:
         momentum_pool = vc2_pool  # 回退：无股票通过动量过滤时使用VC2池
@@ -167,7 +199,7 @@ def _strategy_momentum_value(df: pd.DataFrame, n: int) -> Tuple[pd.DataFrame, st
     result = momentum_pool.nlargest(actual_n, sort_col)
 
     info = (
-        f"VC2前30%({len(vc2_pool)}只) → "
+        f"VC2前10%({len(vc2_pool)}只) → "
         f"动量过滤({len(momentum_pool)}只) → "
         f"涨幅最佳{actual_n}只"
     )
@@ -175,11 +207,11 @@ def _strategy_momentum_value(df: pd.DataFrame, n: int) -> Tuple[pd.DataFrame, st
 
 
 def strategy_momentum_value_25(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
-    return _strategy_momentum_value(df, n=25)
+    return _strategy_momentum_value(df, n=25, strategy_id="momentum_value_25")
 
 
 def strategy_momentum_value_50(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
-    return _strategy_momentum_value(df, n=50)
+    return _strategy_momentum_value(df, n=50, strategy_id="momentum_value_50")
 
 
 # ============================================================
@@ -195,7 +227,7 @@ def strategy_value_growth_25(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
       3. 财务实力+收益质量+VC2 综合排名前50%
       4. 按VC2排序取最佳25只
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "value_growth_25")
     df = compute_all_factors(df)
     valid = _valid_valuation(df)
 
@@ -238,7 +270,7 @@ def strategy_turtle_hare(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     龙头股策略
     书中规则：龙头股 → 3/6月涨幅>中位值 → ROE最高25只
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "turtle_hare")
     df = compute_all_factors(df)
     valid = _valid_valuation(df)
 
@@ -264,31 +296,60 @@ def strategy_turtle_hare(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
 
 def strategy_dividend_enhanced(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     """
-    股息增强型策略
-    书中规则：大盘龙头 + 高EBITDA/EV前50% + 股息率最高50只
-    A股适配：龙头股 + 低PE前50%（替代EBITDA/EV） + ROE最高50只
+    股息增强型策略（书中规则）
+    书中规则：
+      1. 从龙头股中选出
+      2. 按 EBITDA/EV 排序，剔除后50%（保留前50%）
+      3. 选出股息率最高的50只
+      4. 按股息率分层加权（代码中暂用等权）
+    A股适配：若 EBITDA/EV 不可用则回退到低PE，若股息率不可用则回退到ROE
     """
-    df = _apply_market_cap_filter(df)
+    df = _apply_market_cap_filter(df, "dividend_enhanced")
     df = compute_all_factors(df)
     valid = _valid_valuation(df)
 
     turtles = _is_turtle(valid)
 
-    # 低PE前50%
-    if len(turtles) > 0:
-        pe_cutoff = turtles["pe"].quantile(0.50)
-        pe_pool = turtles[turtles["pe"] <= pe_cutoff].copy()
-    else:
-        pe_pool = turtles
+    if len(turtles) == 0:
+        info = "龙头股筛选后为空，无法继续"
+        return turtles, info
 
-    # ROE最高50只
-    actual_n = min(50, len(pe_pool))
-    result = pe_pool.nlargest(actual_n, "roe")
+    # 步骤2：按 EBITDA/EV 排序，保留前50%（书中原文）
+    ebitda_available = "ebitda_ev" in turtles.columns and turtles["ebitda_ev"].notna().sum() > 10
+    if ebitda_available:
+        turtles = turtles[turtles["ebitda_ev"] > 0].copy()  # 排除负值
+        if len(turtles) > 0:
+            cutoff = turtles["ebitda_ev"].quantile(0.50)
+            value_pool = turtles[turtles["ebitda_ev"] >= cutoff].copy()
+        else:
+            value_pool = turtles
+        pool_label = f"EBITDA/EV前50%"
+    else:
+        # 回退：使用PE替代（A股适配）
+        pe_cutoff = turtles["pe"].quantile(0.50)
+        value_pool = turtles[turtles["pe"] <= pe_cutoff].copy()
+        pool_label = "低PE前50%(回退)"
+
+    if len(value_pool) == 0:
+        value_pool = turtles
+        pool_label = "全部龙头股(回退)"
+
+    # 步骤3：股息率最高50只
+    div_available = "dividend_yield" in value_pool.columns and value_pool["dividend_yield"].notna().sum() > 10
+    if div_available:
+        actual_n = min(50, len(value_pool))
+        result = value_pool.nlargest(actual_n, "dividend_yield")
+        sort_label = "股息率最高"
+    else:
+        # 回退：ROE最高
+        actual_n = min(50, len(value_pool))
+        result = value_pool.nlargest(actual_n, "roe")
+        sort_label = "ROE最高(回退)"
 
     info = (
         f"龙头股({len(turtles)}只) → "
-        f"低PE前50%({len(pe_pool)}只) → "
-        f"ROE最高{actual_n}只"
+        f"{pool_label}({len(value_pool)}只) → "
+        f"{sort_label}{actual_n}只"
     )
     return result, info
 

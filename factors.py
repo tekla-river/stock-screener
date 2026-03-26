@@ -211,11 +211,10 @@ def compute_vc1(df: pd.DataFrame) -> pd.DataFrame:
     vc1_factors = ["pe", "pb", "ps"]
     if "ebitda_ev" in df.columns and df["ebitda_ev"].notna().sum() > 10:
         vc1_factors.append("ebitda_ev")
-        print("[VC1] 使用真正的 EBITDA/EV 因子")
+        print("[VC1] 使用真正的 EBITDA/EV 因子，不额外加入市现率（书中VC1共5个因子）")
     else:
         vc1_factors.append("price_cf")
         print("[VC1] EBITDA/EV 数据不足，回退使用市现率替代")
-    vc1_factors.append("price_cf")  # 市现率始终包含
 
     # 各因子百分位：值越小 → 越便宜 → 分数越高（用100-pct反转）
     score = pd.Series(0.0, index=df.index)
